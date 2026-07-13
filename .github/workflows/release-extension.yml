@@ -83,7 +83,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          allowUpdates: true
+          overwrite_files: true
           files: dist/*-chrome.zip
           prerelease: ${{ contains(github.ref_name, '-') }}
         env:
@@ -93,7 +93,7 @@ jobs:
         if: steps.find_xpi.outputs.signed_xpi != ''
         uses: softprops/action-gh-release@v2
         with:
-          allowUpdates: true
+          overwrite_files: true
           files: ${{ steps.find_xpi.outputs.signed_xpi }}
           prerelease: ${{ contains(github.ref_name, '-') }}
         env:
