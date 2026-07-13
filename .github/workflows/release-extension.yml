@@ -1,0 +1,101 @@
+name: Shared Web Extension Release
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout shared workflows
+        uses: actions/checkout@v4
+        with:
+          repository: nichu42/shared-workflows
+          path: .shared-workflows
+
+      - name: Set version from tag
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" manifest.json manifest.firefox.json
+
+      - name: Build packages
+        run: bash build.sh
+
+      - name: Remove unsigned XPI
+        run: rm -f dist/*-firefox.xpi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Sign Firefox extension
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          set +e
+          npx --yes web-ext sign \
+            --source-dir dist/firefox \
+            --artifacts-dir dist \
+            --api-key "$AMO_JWT_ISSUER" \
+            --api-secret "$AMO_JWT_SECRET" \
+            --channel listed \
+            --timeout 900000 2>&1 | tee /tmp/web-ext-out.txt
+          EXIT=${PIPESTATUS[0]}
+          set -e
+
+          if [ $EXIT -ne 0 ]; then
+            if grep -q "already exists" /tmp/web-ext-out.txt; then
+              echo "Version already signed on AMO — downloading existing XPI..."
+              python3 .shared-workflows/scripts/amo_download.py
+            elif grep -q "approval" /tmp/web-ext-out.txt; then
+              echo "Extension is pending AMO review — downloading XPI via API..."
+              python3 .shared-workflows/scripts/amo_download.py
+            else
+              echo "web-ext sign failed with: $(cat /tmp/web-ext-out.txt)"
+              echo "Attempting to download existing XPI from AMO as fallback..."
+              if ! python3 .shared-workflows/scripts/amo_download.py; then
+                exit $EXIT
+              fi
+            fi
+          fi
+
+      - name: Upload & Publish to Chrome Web Store
+        env:
+          CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+          EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+          PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
+        run: |
+          ZIP_FILE=$(find dist -maxdepth 1 -name "*-chrome.zip" | head -1)
+          npx --yes --package=chrome-webstore-upload-cli chrome-webstore-upload \
+            --source "$ZIP_FILE" \
+            --extension-id "$EXTENSION_ID"
+
+      - name: Verify build artifacts
+        run: |
+          sleep 5
+          SIGNED_XPI=$(find dist -maxdepth 1 -name "*.xpi" | head -1)
+          if [ -z "$SIGNED_XPI" ]; then
+            echo "ERROR: No signed XPI found in dist/"
+            exit 1
+          fi
+          echo "Found signed XPI: $SIGNED_XPI"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*-chrome.zip
+            dist/*.xpi
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
